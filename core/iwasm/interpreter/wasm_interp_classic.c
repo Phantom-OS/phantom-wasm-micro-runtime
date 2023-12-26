@@ -9,12 +9,23 @@
 #include "wasm_opcode.h"
 #include "wasm_loader.h"
 #include "../common/wasm_exec_env.h"
+#include <pthread.h>
+#include <errno.h>
 #if WASM_ENABLE_SHARED_MEMORY != 0
 #include "../common/wasm_shared_memory.h"
 #endif
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #include "../libraries/thread-mgr/thread_manager.h"
 #endif
+
+enum action { INIT, NONE, SNAP, STOP, SNAP_STOP, SNAP_START };
+int current_action = INIT;
+
+pthread_mutex_t action_mutex;
+pthread_cond_t action_cond;
+
+char *filename;
+FILE *ptr;
 
 typedef int32 CellType_I32;
 typedef int64 CellType_I64;
@@ -960,6 +971,309 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
+#define READ_SNAP()                                                            \
+    ptr = fopen(filename, "rb");                                               \
+    if (!ptr) {                                                                \
+        fprintf(stdout, "%s %d\n", filename, errno);                           \
+    }                                                                          \
+    else {                                                                     \
+        /* Read memory */                                                      \
+        fread(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);          \
+        fread(&(memory->cur_page_count), sizeof(uint32), 1, ptr);              \
+        fread(&(memory->max_page_count), sizeof(uint32), 1, ptr);              \
+        fread(&length, sizeof(length), 1, ptr);                                \
+        fread(memory->memory_data, sizeof(uint8), length, ptr);                \
+        /* Read globals */                                                     \
+        fread(&length, sizeof(length), 1, ptr);                                \
+        fread(module->global_data, sizeof(uint8), length, ptr);                \
+        /* Read frame */                                                       \
+        fread(&length, sizeof(length), 1, ptr);                                \
+        exec_env->wasm_stack.s.top =                                           \
+            (uint8 *)(length + exec_env->wasm_stack.s.bottom);                 \
+        {                                                                      \
+            size_t nframe;                                                     \
+            fread(&nframe, sizeof(nframe), 1, ptr);                            \
+            for (size_t i = 0; i < nframe; i++) {                              \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                WASMInterpFrame *cur_frame =                                   \
+                    (WASMInterpFrame *)(exec_env->wasm_stack.s.bottom          \
+                                        + length);                             \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->prev_frame =                                        \
+                    (WASMInterpFrame *)(exec_env->wasm_stack.s.bottom          \
+                                        + length);                             \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->function = module->functions + length;              \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->ip =                                                \
+                    length + wasm_get_func_code(cur_frame->function);          \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->sp_bottom =                                         \
+                    (uint32 *)(length + exec_env->wasm_stack.s.bottom);        \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                fread(cur_frame->lp, sizeof(uint32), length, ptr);             \
+                cur_frame->sp = cur_frame->lp + length - 1;                    \
+                /* Read frame csp */                                           \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->sp_boundary =                                       \
+                    (uint32 *)(length + exec_env->wasm_stack.s.bottom);        \
+                cur_frame->csp_bottom =                                        \
+                    (WASMBranchBlock *)(length                                 \
+                                        + exec_env->wasm_stack.s.bottom);      \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->csp_boundary =                                      \
+                    (WASMBranchBlock *)(length                                 \
+                                        + exec_env->wasm_stack.s.bottom);      \
+                fread(&length, sizeof(length), 1, ptr);                        \
+                cur_frame->csp = length + cur_frame->csp_bottom;               \
+                for (size_t i = 0; i < length; i++) {                          \
+                    WASMBranchBlock *cur_frame_csp =                           \
+                        cur_frame->csp_bottom + i;                             \
+                    size_t val_to_save;                                        \
+                    int64 signed_val_to_save;                                  \
+                    fread(&(cur_frame_csp->cell_num), sizeof(uint32), 1, ptr); \
+                    fread(&(val_to_save), sizeof(val_to_save), 1, ptr);        \
+                    cur_frame_csp->begin_addr =                                \
+                        val_to_save + wasm_get_func_code(cur_frame->function); \
+                    fread(&(signed_val_to_save), sizeof(signed_val_to_save),   \
+                          1, ptr);                                             \
+                    cur_frame_csp->target_addr =                               \
+                        signed_val_to_save < 0                                 \
+                            ? NULL                                             \
+                            : signed_val_to_save                               \
+                                  + wasm_get_func_code(cur_frame->function);   \
+                    fread(&(val_to_save), sizeof(val_to_save), 1, ptr);        \
+                    cur_frame_csp->frame_sp =                                  \
+                        (uint32 *)(val_to_save                                 \
+                                   + exec_env->wasm_stack.s.bottom);           \
+                }                                                              \
+                if (i <= 0) {                                                  \
+                    frame = cur_frame;                                         \
+                    frame_lp = frame->lp;                                      \
+                    frame_ip_end = wasm_get_func_code_end(frame->function);    \
+                    prev_frame = frame->prev_frame;                            \
+                    cur_func = frame->function;                                \
+                    UPDATE_ALL_FROM_FRAME();                                   \
+                    wasm_exec_env_set_cur_frame(exec_env,                      \
+                                                (WASMRuntimeFrame *)frame);    \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        fclose(ptr);                                                           \
+    }
+
+#define SAVE_SNAP()                                                            \
+    ptr = fopen(filename, "wb");                                               \
+    /* Write memory */                                                         \
+    fwrite(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);             \
+    fwrite(&(memory->cur_page_count), sizeof(uint32), 1, ptr);                 \
+    fwrite(&(memory->max_page_count), sizeof(uint32), 1, ptr);                 \
+    length = memory->memory_data_end - memory->memory_data + 1;                \
+    fwrite(&length, sizeof(length), 1, ptr);                                   \
+    fwrite(memory->memory_data, sizeof(uint8), length, ptr);                   \
+    /* Write globals */                                                        \
+    length = 0;                                                                \
+    for (uint32 i = 0; i < module->global_count; i++) {                        \
+        global = module->globals + i;                                          \
+        length += wasm_value_type_size(global->type);                          \
+    }                                                                          \
+    fwrite(&length, sizeof(length), 1, ptr);                                   \
+    fwrite(module->global_data, sizeof(uint8), length, ptr);                   \
+    /* Write frame */                                                          \
+    length = exec_env->wasm_stack.s.top - exec_env->wasm_stack.s.bottom;       \
+    fwrite(&length, sizeof(length), 1, ptr);                                   \
+    length = 0;                                                                \
+    {                                                                          \
+        SYNC_ALL_TO_FRAME();                                                   \
+        WASMInterpFrame *cur_frame = frame;                                    \
+        while (cur_frame >= (WASMInterpFrame *)start_frame_addr) {             \
+            length++;                                                          \
+            cur_frame = cur_frame->prev_frame;                                 \
+        }                                                                      \
+        fwrite(&length, sizeof(length), 1, ptr);                               \
+        cur_frame = frame;                                                     \
+        while (cur_frame >= (WASMInterpFrame *)start_frame_addr) {             \
+            length = (uint8 *)cur_frame - exec_env->wasm_stack.s.bottom;       \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = (uint8 *)cur_frame->prev_frame                            \
+                     - exec_env->wasm_stack.s.bottom;                          \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = cur_frame->function - module->functions;                  \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = cur_frame->ip - wasm_get_func_code(cur_frame->function);  \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length =                                                           \
+                (uint8 *)cur_frame->sp_bottom - exec_env->wasm_stack.s.bottom; \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = cur_frame->sp - cur_frame->lp + 1;                        \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            fwrite(cur_frame->lp, sizeof(uint32), length, ptr);                \
+            /* Write frame csp */                                              \
+            length = (uint8 *)cur_frame->csp_bottom                            \
+                     - exec_env->wasm_stack.s.bottom;                          \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = (uint8 *)cur_frame->csp_boundary                          \
+                     - exec_env->wasm_stack.s.bottom;                          \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            length = cur_frame->csp - cur_frame->csp_bottom;                   \
+            fwrite(&length, sizeof(length), 1, ptr);                           \
+            for (size_t i = 0; i < length; i++) {                              \
+                WASMBranchBlock *cur_frame_csp = cur_frame->csp_bottom + i;    \
+                size_t val_to_save;                                            \
+                int64 signed_val_to_save;                                      \
+                fwrite(&(cur_frame_csp->cell_num), sizeof(uint32), 1, ptr);    \
+                val_to_save = cur_frame_csp->begin_addr                        \
+                              - wasm_get_func_code(cur_frame->function);       \
+                fwrite(&(val_to_save), sizeof(val_to_save), 1, ptr);           \
+                signed_val_to_save =                                           \
+                    cur_frame_csp->target_addr == NULL                         \
+                        ? -1                                                   \
+                        : cur_frame_csp->target_addr                           \
+                              - wasm_get_func_code(cur_frame->function);       \
+                fwrite(&(signed_val_to_save), sizeof(signed_val_to_save), 1,   \
+                       ptr);                                                   \
+                val_to_save = (uint8 *)cur_frame_csp->frame_sp                 \
+                              - exec_env->wasm_stack.s.bottom;                 \
+                fwrite(&(val_to_save), sizeof(val_to_save), 1, ptr);           \
+            }                                                                  \
+            cur_frame = cur_frame->prev_frame;                                 \
+        }                                                                      \
+    }                                                                          \
+    fclose(ptr);
+
+#define HANDLE_RETURN()                \
+    pthread_mutex_lock(&action_mutex); \
+    current_action = INIT;             \
+    pthread_cond_signal(&action_cond); \
+    pthread_mutex_unlock(&action_mutex);
+
+#define HANDLE_SNAP_START()             \
+    pthread_mutex_lock(&action_mutex);  \
+    if (current_action == SNAP_START) { \
+        current_action = NONE;          \
+        READ_SNAP();                    \
+    }                                   \
+    pthread_cond_signal(&action_cond);  \
+    pthread_mutex_unlock(&action_mutex);
+
+#define HANDLE_SIGNAL()                              \
+    if (++counter >= 1000) {                         \
+        counter = 0;                                 \
+        pthread_mutex_lock(&action_mutex);           \
+        switch (current_action) {                    \
+            case NONE:                               \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case SNAP:                               \
+                current_action = NONE;               \
+                SAVE_SNAP();                         \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case STOP:                               \
+                current_action = INIT;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            case SNAP_STOP:                          \
+                current_action = INIT;               \
+                SAVE_SNAP();                         \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            default:                                 \
+                current_action = NONE;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+        }                                            \
+    }
+
+void
+take_snapshot(char *file)
+{
+    pthread_mutex_lock(&action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
+    }
+    current_action = SNAP;
+    filename = file;
+    pthread_mutex_unlock(&action_mutex);
+
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == SNAP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
+    return;
+}
+
+void
+take_snapshot_and_stop(char *file)
+{
+    pthread_mutex_lock(&action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
+    }
+    current_action = SNAP_STOP;
+    filename = file;
+    pthread_mutex_unlock(&action_mutex);
+
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == SNAP_STOP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
+    return;
+}
+
+void
+stop()
+{
+    pthread_mutex_lock(&action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
+    }
+    current_action = STOP;
+    pthread_mutex_unlock(&action_mutex);
+
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == STOP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
+    return;
+}
+
+void
+start_from_snapshot(char *file)
+{
+    pthread_mutex_lock(&action_mutex);
+    if (current_action == INIT) {
+        filename = file;
+        current_action = SNAP_START;
+    }
+    pthread_mutex_unlock(&action_mutex);
+}
+
+void
+init_action_primitives()
+{
+    current_action = INIT;
+    pthread_mutex_init(&action_mutex, NULL);
+    pthread_cond_init(&action_cond, NULL);
+}
+
+void
+destroy_action_primitives()
+{
+    pthread_mutex_destroy(&action_mutex);
+    pthread_cond_destroy(&action_cond);
+}
+
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
@@ -992,6 +1306,11 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint8 local_type, *global_addr;
     uint32 cache_index, type_index, cell_num;
     uint8 value_type;
+    size_t length;
+    uint8 *start_frame_addr = exec_env->wasm_stack.s.top;
+    uint16 counter = 0;
+
+    HANDLE_SNAP_START();
 
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 #define HANDLE_OPCODE(op) &&HANDLE_##op
@@ -1049,6 +1368,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     end_addr = NULL;
                 }
                 PUSH_CSP(LABEL_TYPE_BLOCK, cell_num, end_addr);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1065,6 +1385,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 cell_num = wasm_value_type_cell_num(value_type);
             handle_op_loop:
                 PUSH_CSP(LABEL_TYPE_LOOP, cell_num, frame_ip);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1115,6 +1436,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         frame_ip = else_addr + 1;
                     }
                 }
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1122,6 +1444,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             {
                 /* comes from the if branch in WASM_OP_IF */
                 frame_ip = (frame_csp - 1)->target_addr;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1137,6 +1460,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     }
                     goto return_func;
                 }
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1158,6 +1482,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     }
                     frame_ip = end_addr;
                 }
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1170,6 +1495,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 cond = (uint32)POP_I32();
                 if (cond)
                     goto label_pop_csp_n;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1307,12 +1633,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_DROP)
             {
                 frame_sp--;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_DROP_64)
             {
                 frame_sp -= 2;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1322,6 +1650,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 frame_sp--;
                 if (!cond)
                     *(frame_sp - 1) = *frame_sp;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1333,6 +1662,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     *(frame_sp - 2) = *frame_sp;
                     *(frame_sp - 1) = *(frame_sp + 1);
                 }
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1452,6 +1782,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                 }
 
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1463,6 +1794,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         GET_I64_FROM_ADDR(frame_lp + (local_offset & 0x7F)));
                 else
                     PUSH_I32(*(int32 *)(frame_lp + local_offset));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1489,6 +1821,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                 }
 
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1501,6 +1834,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         POP_I64());
                 else
                     *(int32 *)(frame_lp + local_offset) = POP_I32();
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1527,7 +1861,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         wasm_set_exception(module, "invalid local type");
                         goto got_exception;
                 }
-
+                
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1541,6 +1876,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 else
                     *(int32 *)(frame_lp + local_offset) =
                         *(int32 *)(frame_sp - 1);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1551,6 +1887,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUSH_I32(*(uint32 *)global_addr);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1561,6 +1898,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUSH_I64(GET_I64_FROM_ADDR((uint32 *)global_addr));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1571,6 +1909,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 *(int32 *)global_addr = POP_I32();
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1602,6 +1941,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         module->max_aux_stack_used = aux_stack_used;
                 }
 #endif
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1612,6 +1952,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUT_I64_TO_ADDR((uint32 *)global_addr, POP_I64());
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1627,6 +1968,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I32(LOAD_I32(maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1641,6 +1983,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(8);
                 PUSH_I64(LOAD_I64(maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1654,6 +1997,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I32(sign_ext_8_32(*(int8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1667,6 +2011,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I32((uint32)(*(uint8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1680,6 +2025,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I32(sign_ext_16_32(LOAD_I16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1693,6 +2039,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I32((uint32)(LOAD_U16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1706,6 +2053,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I64(sign_ext_8_64(*(int8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1719,6 +2067,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I64((uint64)(*(uint8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1732,6 +2081,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I64(sign_ext_16_64(LOAD_I16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1745,6 +2095,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I64((uint64)(LOAD_U16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1759,6 +2110,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I64(sign_ext_32_64(LOAD_I32(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1772,6 +2124,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I64((uint64)(LOAD_U32(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1788,6 +2141,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 STORE_U32(maddr, frame_sp[1]);
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1804,6 +2158,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 STORE_U32(maddr, frame_sp[1]);
                 STORE_U32(maddr + 4, frame_sp[2]);
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1829,6 +2184,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1858,6 +2214,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     STORE_U32(maddr, (uint32)sval);
                 }
                 (void)flags;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1868,6 +2225,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 read_leb_uint32(frame_ip, frame_ip_end, reserved);
                 PUSH_I32(memory->cur_page_count);
                 (void)reserved;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1893,6 +2251,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
                 (void)reserved;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1919,6 +2278,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 frame_sp++;
                 for (i = 0; i < sizeof(float64); i++)
                     *p_float++ = *frame_ip++;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1926,66 +2286,77 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I32_EQZ)
             {
                 DEF_OP_EQZ(I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_EQ)
             {
                 DEF_OP_CMP(uint32, I32, ==);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_NE)
             {
                 DEF_OP_CMP(uint32, I32, !=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LT_S)
             {
                 DEF_OP_CMP(int32, I32, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LT_U)
             {
                 DEF_OP_CMP(uint32, I32, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GT_S)
             {
                 DEF_OP_CMP(int32, I32, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GT_U)
             {
                 DEF_OP_CMP(uint32, I32, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LE_S)
             {
                 DEF_OP_CMP(int32, I32, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LE_U)
             {
                 DEF_OP_CMP(uint32, I32, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GE_S)
             {
                 DEF_OP_CMP(int32, I32, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GE_U)
             {
                 DEF_OP_CMP(uint32, I32, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -1993,66 +2364,77 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I64_EQZ)
             {
                 DEF_OP_EQZ(I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EQ)
             {
                 DEF_OP_CMP(uint64, I64, ==);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_NE)
             {
                 DEF_OP_CMP(uint64, I64, !=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LT_S)
             {
                 DEF_OP_CMP(int64, I64, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LT_U)
             {
                 DEF_OP_CMP(uint64, I64, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GT_S)
             {
                 DEF_OP_CMP(int64, I64, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GT_U)
             {
                 DEF_OP_CMP(uint64, I64, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LE_S)
             {
                 DEF_OP_CMP(int64, I64, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LE_U)
             {
                 DEF_OP_CMP(uint64, I64, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GE_S)
             {
                 DEF_OP_CMP(int64, I64, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GE_U)
             {
                 DEF_OP_CMP(uint64, I64, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2060,36 +2442,42 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F32_EQ)
             {
                 DEF_OP_CMP(float32, F32, ==);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_NE)
             {
                 DEF_OP_CMP(float32, F32, !=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_LT)
             {
                 DEF_OP_CMP(float32, F32, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_GT)
             {
                 DEF_OP_CMP(float32, F32, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_LE)
             {
                 DEF_OP_CMP(float32, F32, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_GE)
             {
                 DEF_OP_CMP(float32, F32, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2097,36 +2485,42 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F64_EQ)
             {
                 DEF_OP_CMP(float64, F64, ==);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_NE)
             {
                 DEF_OP_CMP(float64, F64, !=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_LT)
             {
                 DEF_OP_CMP(float64, F64, <);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_GT)
             {
                 DEF_OP_CMP(float64, F64, >);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_LE)
             {
                 DEF_OP_CMP(float64, F64, <=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_GE)
             {
                 DEF_OP_CMP(float64, F64, >=);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2134,36 +2528,42 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I32_CLZ)
             {
                 DEF_OP_BIT_COUNT(uint32, I32, clz32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_CTZ)
             {
                 DEF_OP_BIT_COUNT(uint32, I32, ctz32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_POPCNT)
             {
                 DEF_OP_BIT_COUNT(uint32, I32, popcount32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_ADD)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, +);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SUB)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, -);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_MUL)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, *);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2182,6 +2582,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a / b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2196,6 +2597,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a / b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2214,6 +2616,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a % b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2228,42 +2631,49 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a % b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_AND)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, &);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_OR)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, |);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_XOR)
             {
                 DEF_OP_NUMERIC(uint32, uint32, I32, ^);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHL)
             {
                 DEF_OP_NUMERIC2(uint32, uint32, I32, <<);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHR_S)
             {
                 DEF_OP_NUMERIC2(int32, uint32, I32, >>);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHR_U)
             {
                 DEF_OP_NUMERIC2(uint32, uint32, I32, >>);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2274,6 +2684,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = (uint32)POP_I32();
                 a = (uint32)POP_I32();
                 PUSH_I32(rotl32(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2284,6 +2695,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = (uint32)POP_I32();
                 a = (uint32)POP_I32();
                 PUSH_I32(rotr32(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2291,36 +2703,42 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I64_CLZ)
             {
                 DEF_OP_BIT_COUNT(uint64, I64, clz64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_CTZ)
             {
                 DEF_OP_BIT_COUNT(uint64, I64, ctz64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_POPCNT)
             {
                 DEF_OP_BIT_COUNT(uint64, I64, popcount64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_ADD)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, +);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SUB)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, -);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_MUL)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, *);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2339,6 +2757,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a / b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2353,6 +2772,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a / b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2371,6 +2791,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a % b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2385,42 +2806,49 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a % b);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_AND)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, &);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_OR)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, |);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_XOR)
             {
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, ^);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHL)
             {
                 DEF_OP_NUMERIC2_64(uint64, uint64, I64, <<);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHR_S)
             {
                 DEF_OP_NUMERIC2_64(int64, uint64, I64, >>);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHR_U)
             {
                 DEF_OP_NUMERIC2_64(uint64, uint64, I64, >>);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2431,6 +2859,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = (uint64)POP_I64();
                 a = (uint64)POP_I64();
                 PUSH_I64(rotl64(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2441,6 +2870,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = (uint64)POP_I64();
                 a = (uint64)POP_I64();
                 PUSH_I64(rotr64(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2448,6 +2878,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F32_ABS)
             {
                 DEF_OP_MATH(float32, F32, fabs);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2459,60 +2890,70 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     frame_sp[-1] = u32 & ~((uint32)1 << 31);
                 else
                     frame_sp[-1] = u32 | ((uint32)1 << 31);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CEIL)
             {
                 DEF_OP_MATH(float32, F32, ceil);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_FLOOR)
             {
                 DEF_OP_MATH(float32, F32, floor);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_TRUNC)
             {
                 DEF_OP_MATH(float32, F32, trunc);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_NEAREST)
             {
                 DEF_OP_MATH(float32, F32, rint);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_SQRT)
             {
                 DEF_OP_MATH(float32, F32, sqrt);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_ADD)
             {
                 DEF_OP_NUMERIC(float32, float32, F32, +);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_SUB)
             {
                 DEF_OP_NUMERIC(float32, float32, F32, -);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_MUL)
             {
                 DEF_OP_NUMERIC(float32, float32, F32, *);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_DIV)
             {
                 DEF_OP_NUMERIC(float32, float32, F32, /);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2529,6 +2970,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F32(b);
                 else
                     PUSH_F32(wa_fmin(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2545,6 +2987,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F32(b);
                 else
                     PUSH_F32(wa_fmax(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2555,6 +2998,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = POP_F32();
                 a = POP_F32();
                 PUSH_F32(signbit(b) ? -fabs(a) : fabs(a));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2562,6 +3006,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F64_ABS)
             {
                 DEF_OP_MATH(float64, F64, fabs);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2573,48 +3018,56 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUT_I64_TO_ADDR(frame_sp - 2, (u64 & ~(((uint64)1) << 63)));
                 else
                     PUT_I64_TO_ADDR(frame_sp - 2, (u64 | (((uint64)1) << 63)));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CEIL)
             {
                 DEF_OP_MATH(float64, F64, ceil);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_FLOOR)
             {
                 DEF_OP_MATH(float64, F64, floor);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_TRUNC)
             {
                 DEF_OP_MATH(float64, F64, trunc);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_NEAREST)
             {
                 DEF_OP_MATH(float64, F64, rint);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_SQRT)
             {
                 DEF_OP_MATH(float64, F64, sqrt);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_ADD)
             {
                 DEF_OP_NUMERIC_64(float64, float64, F64, +);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_SUB)
             {
                 DEF_OP_NUMERIC_64(float64, float64, F64, -);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2627,6 +3080,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F64_DIV)
             {
                 DEF_OP_NUMERIC_64(float64, float64, F64, /);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2643,6 +3097,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F64(b);
                 else
                     PUSH_F64(wa_fmin(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2659,6 +3114,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F64(b);
                 else
                     PUSH_F64(wa_fmax(a, b));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2669,6 +3125,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 b = POP_F64();
                 a = POP_F64();
                 PUSH_F64(signbit(b) ? -fabs(a) : fabs(a));
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2677,6 +3134,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             {
                 int32 value = (int32)(POP_I64() & 0xFFFFFFFFLL);
                 PUSH_I32(value);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2688,12 +3146,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                    UINT32_MAX is 4294967295, but (float32)4294967295 is
                    4294967296.0f, but not 4294967295.0f. */
                 DEF_OP_TRUNC_F32(-2147483904.0f, 2147483648.0f, true, true);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_TRUNC_U_F32)
             {
                 DEF_OP_TRUNC_F32(-1.0f, 4294967296.0f, true, false);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2704,6 +3164,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                   manually adjust it if src and dst op's cell num is
                   different */
                 frame_sp--;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2711,6 +3172,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             {
                 DEF_OP_TRUNC_F64(-1.0, 4294967296.0, true, false);
                 frame_sp--;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2718,12 +3180,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I64_EXTEND_S_I32)
             {
                 DEF_OP_CONVERT(int64, I64, int32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND_U_I32)
             {
                 DEF_OP_CONVERT(int64, I64, uint32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2732,6 +3196,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 DEF_OP_TRUNC_F32(-9223373136366403584.0f,
                                  9223372036854775808.0f, false, true);
                 frame_sp++;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2739,6 +3204,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             {
                 DEF_OP_TRUNC_F32(-1.0f, 18446744073709551616.0f, false, false);
                 frame_sp++;
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2746,12 +3212,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             {
                 DEF_OP_TRUNC_F64(-9223372036854777856.0, 9223372036854775808.0,
                                  false, true);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_TRUNC_U_F64)
             {
                 DEF_OP_TRUNC_F64(-1.0, 18446744073709551616.0, false, false);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2759,30 +3227,35 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F32_CONVERT_S_I32)
             {
                 DEF_OP_CONVERT(float32, F32, int32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_U_I32)
             {
                 DEF_OP_CONVERT(float32, F32, uint32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_S_I64)
             {
                 DEF_OP_CONVERT(float32, F32, int64, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_U_I64)
             {
                 DEF_OP_CONVERT(float32, F32, uint64, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_DEMOTE_F64)
             {
                 DEF_OP_CONVERT(float32, F32, float64, F64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2790,30 +3263,35 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_F64_CONVERT_S_I32)
             {
                 DEF_OP_CONVERT(float64, F64, int32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_U_I32)
             {
                 DEF_OP_CONVERT(float64, F64, uint32, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_S_I64)
             {
                 DEF_OP_CONVERT(float64, F64, int64, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_U_I64)
             {
                 DEF_OP_CONVERT(float64, F64, uint64, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_PROMOTE_F32)
             {
                 DEF_OP_CONVERT(float64, F64, float32, F32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -2826,30 +3304,35 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I32_EXTEND8_S)
             {
                 DEF_OP_CONVERT(int32, I32, int8, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_EXTEND16_S)
             {
                 DEF_OP_CONVERT(int32, I32, int16, I32);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND8_S)
             {
                 DEF_OP_CONVERT(int64, I64, int8, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND16_S)
             {
                 DEF_OP_CONVERT(int64, I64, int16, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND32_S)
             {
                 DEF_OP_CONVERT(int64, I64, int32, I64);
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -3152,6 +3635,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         wasm_set_exception(module, "unsupported opcode");
                         goto got_exception;
                 }
+                HANDLE_SIGNAL();
                 HANDLE_OP_END();
             }
 
@@ -3656,6 +4140,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             CHECK_SUSPEND_FLAGS();
 #endif
         }
+        HANDLE_SIGNAL();
         HANDLE_OP_END();
     }
 
