@@ -3,11 +3,8 @@
 #ifndef _WASM_C_API_H_
 #define _WASM_C_API_H_
 
-#include <stddef.h>
-#include <stdint.h>
+#include <platform_internal.h>
 #include <stdbool.h>
-#include <string.h>
-#include <assert.h>
 
 #ifndef WASM_API_EXTERN
 #if defined(_MSC_BUILD)

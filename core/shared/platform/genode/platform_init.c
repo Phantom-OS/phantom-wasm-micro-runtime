@@ -25,19 +25,21 @@ bh_platform_destroy()
 int
 os_printf(const char *format, ...)
 {
-    int ret = 0;
-    va_list ap;
+    // int ret = 0;
+    // va_list ap;
 
-    va_start(ap, format);
-    ret += vprintf(format, ap);
-    va_end(ap);
+    // va_start(ap, format);
+    // ret += vprintf(format, ap);
+    // va_end(ap);
 
-    return ret;
+    // return ret;
+    return -1;
 }
 
 int
 os_vprintf(const char *format, va_list ap)
 {
-    return vprintf(format, ap);
+    // return vprintf(format, ap);
+    return -1;
 }
 
