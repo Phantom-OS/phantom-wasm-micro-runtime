@@ -6,52 +6,27 @@
 #ifndef _PLATFORM_INTERNAL_H
 #define _PLATFORM_INTERNAL_H
 
-// Fixing signals.h error with __size_t
-// #include <sys/cdefs.h>
-// #include <machine/_types.h>
-
-// #include <inttypes.h>
+#include <kernel/config.h>
 #include <stdint.h>
-//#include <stdbool.h>
 #include <assert.h>
-// #include <time.h>
-// #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <stdarg.h>
 #include <ctype.h>
-//#include <pthread.h>
-//#include <phantom_threads.h>
-//#include <phantom_sync.h>
-// #include <signal.h>
-//#include <semaphore.h>
 #include <limits.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
-//#include <poll.h>
-//#include <sched.h>
 #include <errno.h>
-//#include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-//#include <sys/mman.h>
-//#include <sys/time.h>
-// #include <sys/timeb.h>
-//#include <sys/uio.h>
 #include <sys/ioctl.h>
-// #include <sys/socket.h>
-//#include <sys/resource.h>
+
 #include "string_adapter.h"
+#include "print_adapter.h"
+#include "malloc_adapter.h"
 #include "stubs.h"
-#include <kernel/config.h>
-
-// Have to be defined last since defines empty macro __size_t (but why???)
-// #include <stddef.h>
-
-#include "genode_missing_types.h"
-// #include "wasi_missing.h"
 
 
 #ifdef __cplusplus
@@ -97,43 +72,14 @@ typedef struct phantom_cond_impl korp_cond;
 
 #define os_thread_local_attribute __thread
 
-// typedef jmp_buf korp_jmpbuf;
-
-typedef struct stub_jmpbuf { int _placeholder; } korp_jmpbuf;
-
+// only used for AOT
 #define os_setjmp setjmp
+// AOT + thread manager
 #define os_longjmp longjmp
-#define os_alloca alloca
 
 #define os_getpagesize getpagesize
 
 typedef void (*os_signal_handler)(void *sig_addr);
-
-int os_signal_init(os_signal_handler handler);
-
-void os_signal_destroy();
-
-void os_signal_unmask();
-
-void os_sigreturn();
-
-static inline korp_tid os_self_thread(void) { return 0; }
-
-static inline uint64 os_time_get_boot_microsecond(void) { return 0; }
-
-static inline uint8* os_thread_get_stack_boundary(void) { return NULL; }
-
-static inline void * os_malloc(unsigned size) { return 0; }
-
-static inline void * os_realloc(void *ptr, unsigned size) { return 0; }
-
-static inline void os_free(void *ptr) { }
-
-// Currently mutexes only used in memory allocation (i think) [core/shared/mem-alloc/ems]
-static inline int os_mutex_lock(korp_mutex *mutex) { return 0; }
-static inline int os_mutex_unlock(korp_mutex *mutex) { return 0; }
-static inline int os_mutex_init(korp_mutex *mutex) { return 0; }
-static inline int os_mutex_destroy(korp_mutex *mutex) { return 0; }
 
 #endif /* end of BUILD_TARGET_X86_64/AMD_64/AARCH64 */
 #endif /* end of WASM_DISABLE_HW_BOUND_CHECK */
