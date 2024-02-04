@@ -70,10 +70,10 @@ Stubbed for now (return 0 every time)
 
 */
 
-int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags){
-  return 0;
-}
-
-int futimens(int fd, const struct timespec times[2]){
-  return 0;
-}
+// int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags){
+//   return 0;
+// }
+// 
+// int futimens(int fd, const struct timespec times[2]){
+//   return 0;
+// }

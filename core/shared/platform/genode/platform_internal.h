@@ -68,6 +68,8 @@ typedef struct phantom_cond_impl korp_cond;
 
 //#include <setjmp.h>
 
+typedef struct { int _placeholder; } korp_jmpbuf;
+
 #define OS_ENABLE_HW_BOUND_CHECK
 
 #define os_thread_local_attribute __thread
@@ -80,6 +82,26 @@ typedef struct phantom_cond_impl korp_cond;
 #define os_getpagesize getpagesize
 
 typedef void (*os_signal_handler)(void *sig_addr);
+
+/*
+    NB: These methods below are here because some of the types they need (korp_tid, uint64, etc.)
+    are definced / declared / included here.
+*/
+
+// WAMR says this one's optional (used for logging)
+static inline korp_tid os_self_thread(void) { return 0; }
+
+// Needed for logging and performance tracking. Can be implmeneted later
+static inline uint64 os_time_get_boot_microsecond(void) { return 0; }
+
+// Can return NULL for now, but WAMR recommends implementing it if possible
+static inline uint8* os_thread_get_stack_boundary(void) { return NULL; }
+
+// Currently mutexes only used in memory allocation (i think) [core/shared/mem-alloc/ems]
+static inline int os_mutex_lock(korp_mutex *mutex) { return 0; }
+static inline int os_mutex_unlock(korp_mutex *mutex) { return 0; }
+static inline int os_mutex_init(korp_mutex *mutex) { return 0; }
+static inline int os_mutex_destroy(korp_mutex *mutex) { return 0; }
 
 #endif /* end of BUILD_TARGET_X86_64/AMD_64/AARCH64 */
 #endif /* end of WASM_DISABLE_HW_BOUND_CHECK */

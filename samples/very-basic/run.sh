@@ -1,3 +1,3 @@
 #!/bin/bash
 
-out/basic ./out/wasm-apps/calculate_e.wasm 50
+out/basic ./out/wasm-apps/simple_functions.wasm 50

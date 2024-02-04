@@ -777,9 +777,9 @@ wasm_interp_call_func_native(WASMModuleInstance *module_inst,
     wasm_exec_env_set_cur_frame(exec_env, frame);
 
     if (!func_import->func_ptr_linked) {
-        // snprintf(buf, sizeof(buf),
-        //          "failed to call unlinked import function (%s, %s)",
-        //          func_import->module_name, func_import->field_name);
+        snprintf(buf, sizeof(buf),
+                 "failed to call unlinked import function (%s, %s)",
+                 func_import->module_name, func_import->field_name);
         wasm_set_exception(module_inst, buf);
         return;
     }
@@ -845,9 +845,9 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
     char buf[128];
 
     if (!sub_func_inst) {
-        // snprintf(buf, sizeof(buf),
-        //          "failed to call unlinked import function (%s, %s)",
-        //          func_import->module_name, func_import->field_name);
+        snprintf(buf, sizeof(buf),
+                 "failed to call unlinked import function (%s, %s)",
+                 func_import->module_name, func_import->field_name);
         wasm_set_exception(module_inst, buf);
         return;
     }
@@ -908,10 +908,27 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #endif /* WASM_ENABLE_DEBUG_INTERP */
 #endif /* WASM_ENABLE_THREAD_MGR */
 
+#ifdef WASM_PHANTOM_COMPAT
+extern volatile int     phantom_virtual_machine_snap_request;
+void phantom_thread_wait_4_snap( void );
+#endif /* WASM_PHANTOM_COMPAT */
+
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
+
+#ifndef WASM_PHANTOM_COMPAT
 #define FETCH_OPCODE_AND_DISPATCH() goto *handle_table[*frame_ip++]
+#else 
+#define FETCH_OPCODE_AND_DISPATCH() do {                                  \
+        if(phantom_virtual_machine_snap_request)                          \
+        {                                                                 \
+            /*pvm_exec_save_fast_acc(da); // Before snap */               \
+            phantom_thread_wait_4_snap();                                 \
+        }                                                                 \
+        goto *handle_table[*frame_ip++];                                  \
+    } while (0)
+#endif /* WASM_PHANTOM_COMPAT */
 
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #define HANDLE_OP_END()                                                   \
@@ -1013,6 +1030,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
+#ifdef WASM_PHANTOM_COMPAT
+        if(phantom_virtual_machine_snap_request)
+        {
+            // pvm_exec_save_fast_acc(da); // Before snap
+            phantom_thread_wait_4_snap();
+        }
+#endif /* WASM_PHANTOM_COMPAT */
         opcode = *frame_ip++;
         switch (opcode) {
 #else
@@ -3888,8 +3912,8 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
 
     if (argc != function->param_cell_num) {
         char buf[128];
-        // snprintf(buf, sizeof(buf), "invalid argument count %d, expected %d",
-        //          argc, function->param_cell_num);
+        snprintf(buf, sizeof(buf), "invalid argument count %d, expected %d",
+                 argc, function->param_cell_num);
         wasm_set_exception(module_inst, buf);
         return;
     }
