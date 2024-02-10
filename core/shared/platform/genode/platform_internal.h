@@ -25,7 +25,6 @@
 
 #include "string_adapter.h"
 #include "print_adapter.h"
-#include "malloc_adapter.h"
 #include "stubs.h"
 
 
