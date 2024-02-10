@@ -1016,7 +1016,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #endif
 
 #if WASM_PHANTOM_COMPAT
-    if (prev_frame == NULL && cur_func == NULL) 
+    if (prev_frame == NULL) 
         RECOVER_CONTEXT(wasm_exec_env_get_cur_frame(exec_env));
 #endif
 
@@ -3727,7 +3727,7 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
     unsigned i;
 
 #ifdef WASM_PHANTOM_COMPAT
-    bool phantom_restart = function == NULL && argc == -1;
+    bool phantom_restart = argc == -1;
     if (!phantom_restart) {
 #endif
         /* Allocate sufficient cells for all kinds of return values.  */
@@ -3765,14 +3765,11 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
             word_copy(outs_area->lp, argv, argc);
 
         wasm_exec_env_set_cur_frame(exec_env, frame);
-    }
-
-    if ((function->is_import_func
 #ifdef WASM_PHANTOM_COMPAT
-            && !phantom_restart)
-        || (phantom_restart && prev_frame->function->is_import_func
+    }
 #endif
-    )) {
+
+    if (function->is_import_func) { // TODO: implement restart for imports ??
 #if WASM_ENABLE_MULTI_MODULE != 0
         if (function->import_module_inst) {
             wasm_interp_call_func_import(module_inst, exec_env, function,
