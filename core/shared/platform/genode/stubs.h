@@ -30,7 +30,6 @@ void os_sigreturn();
 static inline void abort(void) {};
 
 // these are for built-in libc feature
-inline static int atoi(const char *str) {}
 inline static void*   memchr(void*, int, size_t) {}
 inline static int 	strncasecmp(const char *s1, const char *s2, size_t len) {}
 inline static size_t 	strspn(const char *s, const char *accept) {}

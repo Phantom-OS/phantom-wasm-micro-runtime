@@ -17,5 +17,6 @@ static inline int 	strncmp(const char *s1, const char *s2, size_t n) { return ph
 static inline char *strncpy(char *to, const char *from, ssize_t count) { return ph_strncpy(to, from, count); }
 static inline long 	strtol(const char *nptr, char **endptr, int base) { return ph_strtol(nptr, endptr, base); }
 static inline char *strstr(const char *s1, const char *s2) { return ph_strstr(s1, s2); }
+static inline int   atoi(const char *str) { return ph_atoi(str); }
 
 #endif // GENODE_STRING_ADAPTER_H

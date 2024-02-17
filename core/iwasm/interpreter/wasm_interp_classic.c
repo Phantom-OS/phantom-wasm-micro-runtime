@@ -3789,7 +3789,13 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
 
 #ifdef WASM_PHANTOM_COMPAT
     if (phantom_restart) {
-        frame = prev_frame;
+        // XXX : basing this on supposition that when we call wasm from phantom
+        //       execution env.'s stack is empty (i.e. prev_frame == NULL)
+        while ((frame = wasm_exec_env_get_cur_frame(exec_env)->prev_frame)) {
+            wasm_exec_env_set_cur_frame(exec_env, frame);
+        }
+
+        frame = wasm_exec_env_get_cur_frame(exec_env);
         prev_frame = frame->prev_frame;
     }
 #endif
