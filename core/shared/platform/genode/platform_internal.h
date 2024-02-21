@@ -23,6 +23,7 @@
 #include <ph_setjmp.h>
 #include <kernel/mutex.h>
 #include <kernel/cond.h>
+#include <threads.h>
 
 #include "string_adapter.h"
 #include "print_adapter.h"
