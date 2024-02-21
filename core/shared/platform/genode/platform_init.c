@@ -13,8 +13,8 @@ void bh_platform_destroy() { }
 // ##########  MALLOC  ##########
 // ##############################
 
-extern void wamr_alloc_callback(pvm_object_t obj);
-extern void wamr_free_callback(pvm_object_t obj);
+extern void wamr_phantom_alloc_callback(pvm_object_t obj);
+extern void wamr_phantom_free_callback(pvm_object_t obj);
 
 #define OBJECT_FROM_DATA(data_ptr) \
     pvm_da_to_object((void*)((uintptr_t)data_ptr - 4 - __offsetof(struct data_area_4_binary, data)))
@@ -26,7 +26,7 @@ void *os_malloc(unsigned size) {
     size += MEMORY_OFFSET; // for 8-byte alignment
     // Simplest object to create. Contents are uninitialized
     pvm_object_t object = pvm_create_binary_object(size, NULL);
-    wamr_alloc_callback(object);
+    wamr_phantom_alloc_callback(object);
 
     return (void*)((uintptr_t) pvm_data_area(object, binary)->data + MEMORY_OFFSET);
 }
@@ -35,7 +35,7 @@ static inline void os_free_internal(pvm_object_t object) {
     if (object->_ah.object_start_marker != PVM_OBJECT_START_MARKER) 
         panic("Wamr invalid object free");
 
-    wamr_free_callback(object);
+    wamr_phantom_free_callback(object);
     ref_dec_o(object);
 }
 

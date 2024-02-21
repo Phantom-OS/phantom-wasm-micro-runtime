@@ -77,7 +77,7 @@ long long long_sum_test(long long iter_count, int interval, long long start) {
 
     int last_perc = 0;
 
-    for (long long i = 0; i < iter_count; i += 10) {
+    for (long long i = 0; i < iter_count; i++) {
         sum += step;
         step += interval;
 
