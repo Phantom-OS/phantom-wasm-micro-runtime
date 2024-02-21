@@ -69,42 +69,6 @@ int calculate_percentage(long long num, long long den) {
     return (int)(100 * num / den);
 }
 
-long long get_sum(long long start, long long end) {
-    long long sum = 0;
-    
-    for (long long i = start; i <= end; i++) {
-        sum += i;
-    }
-
-    return sum;
-}
-
-long long get_comp_sum(int iter_count) {
-    long long sum = 0;
-    long long end = 10000;
-    int over = 0;
-
-    for (int i = 0; i < iter_count; i++) {
-        long long local_sum = get_sum(i, i + end);
-        sum += local_sum;
-        
-        if (sum >= 1000000000) {
-            sum /= end;
-            end -= 1;
-            printf("Overflow: %d %d\n", (int)sum, (int)end);
-
-            if (end == 0) {
-                over++;
-                end = 10000 + over;
-            }
-        }
-    }
-
-    printf("R: %d %d\n", *((int*)&sum), (int)(sum >> 32));
-
-    return sum;
-}
-
 long long long_sum_test(long long iter_count, int interval, long long start) {
     long long sum = 0;
     long long step = start;
@@ -129,20 +93,3 @@ long long long_sum_test(long long iter_count, int interval, long long start) {
     return sum;
 }
 
-void perf_test(int arg) {
-    int sum = 0;
-    int sum2 = -500;
-    
-    for (int i = 0; i < arg; i++) {
-        sum += i;
-        sum /= 2;
-
-        if (i) sum2++;
-    }
-
-    // printf("%d %d\n", sum, sum2);
-}
-
-int main() {
-    long_sum_test(5000000, 1, 0);
-}

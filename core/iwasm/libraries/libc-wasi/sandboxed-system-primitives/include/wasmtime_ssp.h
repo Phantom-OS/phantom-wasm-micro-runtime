@@ -20,6 +20,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#if WASM_PHANTOM_COMPAT != 0 // this header contains offsetof()
+#include <platform_common.h>
+#endif
 
 /* clang-format off */
 

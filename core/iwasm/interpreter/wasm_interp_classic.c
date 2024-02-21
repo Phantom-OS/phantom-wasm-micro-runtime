@@ -908,7 +908,7 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #endif /* WASM_ENABLE_DEBUG_INTERP */
 #endif /* WASM_ENABLE_THREAD_MGR */
 
-#ifdef WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
 extern volatile int     phantom_virtual_machine_snap_request;
 void phantom_thread_wait_4_snap( void );
 #endif /* WASM_PHANTOM_COMPAT */
@@ -931,7 +931,7 @@ void phantom_thread_wait_4_snap( void );
         }                                                                 \
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
-#elif WASM_PHANTOM_COMPAT
+#elif WASM_PHANTOM_COMPAT != 0
 #define HANDLE_OP_END()                                                 \
     do {                                                                \
         if(phantom_virtual_machine_snap_request)                          \
@@ -1015,14 +1015,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #undef HANDLE_OPCODE
 #endif
 
-#if WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
     if (prev_frame == NULL) 
         RECOVER_CONTEXT(wasm_exec_env_get_cur_frame(exec_env));
 #endif
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
-#ifdef WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
         if(phantom_virtual_machine_snap_request)
         {
             SYNC_ALL_TO_FRAME();
@@ -3726,7 +3726,7 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
     WASMInterpFrame *frame = NULL, *outs_area;
     unsigned i;
 
-#ifdef WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
     bool phantom_restart = argc == -1;
     if (!phantom_restart) {
 #endif
@@ -3765,7 +3765,7 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
             word_copy(outs_area->lp, argv, argc);
 
         wasm_exec_env_set_cur_frame(exec_env, frame);
-#ifdef WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
     }
 #endif
 
@@ -3787,7 +3787,7 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
         wasm_interp_call_func_bytecode(module_inst, exec_env, function, frame);
     }
 
-#ifdef WASM_PHANTOM_COMPAT
+#if WASM_PHANTOM_COMPAT != 0
     if (phantom_restart) {
         // XXX : basing this on supposition that when we call wasm from phantom
         //       execution env.'s stack is empty (i.e. prev_frame == NULL)
