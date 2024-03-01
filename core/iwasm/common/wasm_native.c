@@ -398,6 +398,16 @@ wasm_native_init()
     return true;
 }
 
+#if WASM_PHANTOM_COMPAT != 0
+void *wasm_get_natives_list(void) {
+    return g_native_symbols_list;
+}
+
+void wasm_set_natives_list(void *natives_list) {
+    g_native_symbols_list = natives_list;
+}
+#endif
+
 void
 wasm_native_destroy()
 {

@@ -941,6 +941,14 @@ wasm_externref_retain(uint32_t externref_idx);
 WASM_RUNTIME_API_EXTERN void
 wasm_runtime_dump_call_stack(wasm_exec_env_t exec_env);
 
+#if WASM_PHANTOM_COMPAT != 0
+/*
+ * Give access to native symbol list defined in wasm_native.c
+ */
+void *wasm_get_natives_list(void);
+void wasm_set_natives_list(void *natives_list);
+#endif
+
 /* clang-format on */
 
 #ifdef __cplusplus
