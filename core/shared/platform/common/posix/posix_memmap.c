@@ -42,7 +42,7 @@ os_mmap(void *hint, size_t size, int prot, int flags)
     page_size = (uint64)getpagesize();
     request_size = (size + page_size - 1) & ~(page_size - 1);
 
-#if !defined(__APPLE__) && !defined(__NuttX__)
+#if !defined(__APPLE__) && !defined(__NuttX__) && !defined(__GENODE__)
     /* huge page isn't supported on MacOS and NuttX */
     if (request_size >= HUGE_PAGE_SIZE)
         /* apply one extra huge page */
@@ -146,7 +146,7 @@ os_mmap(void *hint, size_t size, int prot, int flags)
               addr, request_size, total_size_mmapped, total_size_munmapped);
 #endif
 
-#if !defined(__APPLE__) && !defined(__NuttX__)
+#if !defined(__APPLE__) && !defined(__NuttX__) && !defined(__GENODE__)
     /* huge page isn't supported on MacOS and NuttX */
     if (request_size > HUGE_PAGE_SIZE) {
         uintptr_t huge_start, huge_end;
