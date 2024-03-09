@@ -93,16 +93,33 @@ extern int wamr_phantom_create_cond(hal_cond_t *mutex, const char *name);
 extern int wamr_phantom_destroy_cond(hal_cond_t *mutex);
 
 // mutexes
+static inline errno_t pthread_mutex_init(pthread_mutex_t *m, const char *name) { return wamr_phantom_create_mutex(m, name); }
 static inline int os_mutex_init(korp_mutex *m) { return wamr_phantom_create_mutex(m, NULL); }
+
+static inline errno_t pthread_mutex_lock(pthread_mutex_t *m) { return hal_mutex_lock(m); }
 static inline int os_mutex_lock(korp_mutex *m) { return hal_mutex_lock(m); }
+
+static inline errno_t pthread_mutex_unlock(pthread_mutex_t *m) { return hal_mutex_unlock(m); }
 static inline int os_mutex_unlock(korp_mutex *m) { return hal_mutex_unlock(m); }
+
+static inline errno_t pthread_mutex_destroy(hal_mutex_t *m) { return wamr_phantom_destroy_mutex(m); }
 static inline int os_mutex_destroy(korp_mutex *m) { return wamr_phantom_destroy_mutex(m); }
 
 // conds
+static inline errno_t pthread_cond_init(pthread_cond_t *c, const char *name) { return wamr_phantom_create_cond(c, name); }
 static inline int os_cond_init(korp_cond *c) { return wamr_phantom_create_cond(c, NULL); }
+
+static inline errno_t pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) { return hal_cond_wait(c, m); }
 static inline int os_cond_wait(korp_cond *c, korp_mutex *m) { return hal_cond_wait(c, m); }
+
+static inline errno_t pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m, struct timespec* timeout) 
+    { return hal_cond_timedwait(c, m, timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000); }
 static inline int os_cond_timedwait(korp_cond *c, korp_mutex *m, uint64 msecTimeout) { return hal_cond_timedwait(c, m, msecTimeout); }
+
+static inline errno_t pthread_cond_signal(pthread_cond_t *c) { return hal_cond_signal(c); }
 static inline int os_cond_signal(korp_cond *c) { return hal_cond_signal(c); }
+
+static inline errno_t pthread_cond_destroy(pthread_cond_t *c) { return wamr_phantom_destroy_cond(c); }
 static inline int os_cond_destroy(korp_cond *c) { return wamr_phantom_destroy_cond(c); }
 
 #endif /* end of BUILD_TARGET_X86_64/AMD_64/AARCH64 */

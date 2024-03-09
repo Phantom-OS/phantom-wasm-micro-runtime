@@ -3,7 +3,6 @@
 
 set (PLATFORM_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR})
 
-# add_definitions(-DBH_PLATFORM_LINUX)
 add_definitions(-DBH_PLATFORM_POSIX)
 add_definitions(-D__FreeBSD__=5)
 
@@ -18,16 +17,16 @@ add_definitions(-DSSP_CONFIG_H)
 add_definitions(-DCONFIG_HAS_PREADV=0)
 add_definitions(-DCONFIG_HAS_PWRITEV=0)
 add_definitions(-DCONFIG_HAS_POSIX_FALLOCATE=0)
+add_definitions(-DCONFIG_HAS_ARC4RANDOM_BUF=0)
+add_definitions(-DCONFIG_HAS_GETRANDOM=1)
+add_definitions(-DCONFIG_HAS_PTHREAD_CONDATTR_SETCLOCK=0)
 
 # Defaults are also ok, but decided to fix this ones
-add_definitions(-DCONFIG_HAS_ARC4RANDOM_BUF=1)
-add_definitions(-DCONFIG_HAS_GETRANDOM=0)
 add_definitions(-DCONFIG_HAS_CAP_ENTER=0)
 add_definitions(-DCONFIG_HAS_CLOCK_NANOSLEEP=0)
 add_definitions(-DCONFIG_HAS_FDATASYNC=0)
 add_definitions(-DCONFIG_HAS_ISATTY=0)
 add_definitions(-DCONFIG_HAS_PTHREAD_COND_TIMEDWAIT_RELATIVE_NP=0)
-add_definitions(-DCONFIG_HAS_PTHREAD_CONDATTR_SETCLOCK=1)
 add_definitions(-DCONFIG_TLS_USE_GSBASE=0)
 add_definitions(-DCONFIG_HAS_STD_ATOMIC=1)
 

@@ -966,7 +966,13 @@ wasi_proc_exit(wasm_exec_env_t exec_env, wasi_exitcode_t rval)
     /* Here throwing exception is just to let wasm app exit,
        the upper layer should clear the exception and return
        as normal */
+#if WASM_PHANTOM_COMPAT != 0
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%s%d", "wasi proc exit:", rval);
+    wasm_runtime_set_exception(module_inst, buf);
+#else
     wasm_runtime_set_exception(module_inst, "wasi proc exit");
+#endif
 }
 
 static wasi_errno_t
@@ -1122,10 +1128,13 @@ wasi_sched_yield(wasm_exec_env_t exec_env)
 static NativeSymbol native_symbols_libc_wasi[] = {
     REG_NATIVE_FUNC(args_get, "(**)i"),
     REG_NATIVE_FUNC(args_sizes_get, "(**)i"),
+#if WASM_PHANTOM_COMPAT == 0
     REG_NATIVE_FUNC(clock_res_get, "(i*)i"),
     REG_NATIVE_FUNC(clock_time_get, "(iI*)i"),
+#endif
     REG_NATIVE_FUNC(environ_get, "(**)i"),
     REG_NATIVE_FUNC(environ_sizes_get, "(**)i"),
+#if WASM_PHANTOM_COMPAT == 0
     REG_NATIVE_FUNC(fd_prestat_get, "(i*)i"),
     REG_NATIVE_FUNC(fd_prestat_dir_name, "(i*~)i"),
     REG_NATIVE_FUNC(fd_close, "(i)i"),
@@ -1158,12 +1167,15 @@ static NativeSymbol native_symbols_libc_wasi[] = {
     REG_NATIVE_FUNC(path_unlink_file, "(i*~)i"),
     REG_NATIVE_FUNC(path_remove_directory, "(i*~)i"),
     REG_NATIVE_FUNC(poll_oneoff, "(**i*)i"),
+#endif
     REG_NATIVE_FUNC(proc_exit, "(i)"),
     REG_NATIVE_FUNC(proc_raise, "(i)i"),
     REG_NATIVE_FUNC(random_get, "(*~)i"),
+#if WASM_PHANTOM_COMPAT == 0
     REG_NATIVE_FUNC(sock_recv, "(i*ii**)i"),
     REG_NATIVE_FUNC(sock_send, "(i*ii*)i"),
     REG_NATIVE_FUNC(sock_shutdown, "(ii)i"),
+#endif
     REG_NATIVE_FUNC(sched_yield, "()i"),
 };
 

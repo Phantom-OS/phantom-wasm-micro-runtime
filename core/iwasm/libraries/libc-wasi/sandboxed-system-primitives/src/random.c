@@ -25,7 +25,7 @@ random_buf(void *buf, size_t len)
 
 #elif CONFIG_HAS_GETRANDOM
 
-#ifndef BH_PLATFORM_LINUX_SGX
+#if !defined(BH_PLATFORM_LINUX_SGX) && WASM_PHANTOM_COMPAT == 0
 #include <sys/random.h>
 #endif
 

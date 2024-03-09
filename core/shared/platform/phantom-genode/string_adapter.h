@@ -20,4 +20,7 @@ static inline char *strstr(const char *s1, const char *s2) { return ph_strstr(s1
 static inline int   atoi(const char *str) { return ph_atoi(str); }
 static inline void *memchr(const void *ptr, int ch, size_t count) { return ph_memchr(ptr, ch, count); }
 
+// Additional just for WASI
+static inline size_t strnlen(const char *s, size_t count) { return ph_strnlen(s, count); }
+
 #endif // GENODE_STRING_ADAPTER_H
