@@ -24,7 +24,6 @@
 #include <kernel/mutex.h>
 #include <kernel/cond.h>
 #include <threads.h>
-#include <ph_malloc.h>
 
 #include "string_adapter.h"
 #include "print_adapter.h"
@@ -73,10 +72,6 @@ typedef jmp_buf korp_jmpbuf;
 
 typedef void (*os_signal_handler)(void *sig_addr);
 
-static inline void *os_malloc(unsigned size) { return ph_malloc(size); }
-static inline void *os_realloc(void *ptr, unsigned size) { return ph_realloc(ptr, size); }
-static inline void os_free(void *ptr) { ph_free(ptr); }
-
 /*
     NB: These methods below are here because some of the types they need (korp_tid, uint64, etc.)
     are definced / declared / included here.
@@ -91,18 +86,24 @@ static inline uint64 os_time_get_boot_microsecond(void) { return 0; }
 // Can return NULL for now, but WAMR recommends implementing it if possible
 static inline uint8* os_thread_get_stack_boundary(void) { return NULL; }
 
+// phantom callbacks
+extern int wamr_phantom_create_mutex(hal_mutex_t *mutex, const char *name);
+extern int wamr_phantom_destroy_mutex(hal_mutex_t *mutex);
+extern int wamr_phantom_create_cond(hal_cond_t *mutex, const char *name);
+extern int wamr_phantom_destroy_cond(hal_cond_t *mutex);
+
 // mutexes
-static inline int os_mutex_init(korp_mutex *m) { return hal_mutex_init(m, NULL); }
+static inline int os_mutex_init(korp_mutex *m) { return wamr_phantom_create_mutex(m, NULL); }
 static inline int os_mutex_lock(korp_mutex *m) { return hal_mutex_lock(m); }
 static inline int os_mutex_unlock(korp_mutex *m) { return hal_mutex_unlock(m); }
-static inline int os_mutex_destroy(korp_mutex *m) { return hal_mutex_destroy(m); }
+static inline int os_mutex_destroy(korp_mutex *m) { return wamr_phantom_destroy_mutex(m); }
 
 // conds
-static inline int os_cond_init(korp_cond *c) { return hal_cond_init(c, NULL); }
+static inline int os_cond_init(korp_cond *c) { return wamr_phantom_create_cond(c, NULL); }
 static inline int os_cond_wait(korp_cond *c, korp_mutex *m) { return hal_cond_wait(c, m); }
 static inline int os_cond_timedwait(korp_cond *c, korp_mutex *m, uint64 msecTimeout) { return hal_cond_timedwait(c, m, msecTimeout); }
 static inline int os_cond_signal(korp_cond *c) { return hal_cond_signal(c); }
-static inline int os_cond_destroy(korp_cond *c) { return hal_cond_destroy(c); }
+static inline int os_cond_destroy(korp_cond *c) { return wamr_phantom_destroy_cond(c); }
 
 #endif /* end of BUILD_TARGET_X86_64/AMD_64/AARCH64 */
 #endif /* end of WASM_DISABLE_HW_BOUND_CHECK */

@@ -908,6 +908,11 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
 #endif /* WASM_ENABLE_DEBUG_INTERP */
 #endif /* WASM_ENABLE_THREAD_MGR */
 
+#if WASM_PHANTOM_COMPAT != 0
+extern volatile int     phantom_virtual_machine_snap_request;
+void phantom_thread_wait_4_snap( void );
+#endif /* WASM_PHANTOM_COMPAT */
+
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 
 #define HANDLE_OP(opcode) HANDLE_##opcode:
@@ -922,6 +927,16 @@ wasm_interp_call_func_import(WASMModuleInstance *module_inst,
             SYNC_ALL_TO_FRAME();                                          \
             wasm_cluster_thread_stopped(exec_env);                        \
             wasm_cluster_thread_waiting_run(exec_env);                    \
+        }                                                                 \
+        goto *handle_table[*frame_ip++];                                  \
+    } while (0)
+#elif WASM_PHANTOM_COMPAT != 0
+#define HANDLE_OP_END()                                                 \
+    do {                                                                \
+        if(phantom_virtual_machine_snap_request)                          \
+        {                                                                 \
+            SYNC_ALL_TO_FRAME();                                          \
+            phantom_thread_wait_4_snap();                                 \
         }                                                                 \
         goto *handle_table[*frame_ip++];                                  \
     } while (0)
@@ -999,8 +1014,20 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #undef HANDLE_OPCODE
 #endif
 
+#if WASM_PHANTOM_COMPAT != 0
+    if (prev_frame == NULL) 
+        RECOVER_CONTEXT(wasm_exec_env_get_cur_frame(exec_env));
+#endif
+
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
     while (frame_ip < frame_ip_end) {
+#if WASM_PHANTOM_COMPAT != 0
+        if(phantom_virtual_machine_snap_request)
+        {
+            SYNC_ALL_TO_FRAME();
+            phantom_thread_wait_4_snap();
+        }
+#endif /* WASM_PHANTOM_COMPAT */
         opcode = *frame_ip++;
         switch (opcode) {
 #else
@@ -3698,46 +3725,53 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
                       uint32 argv[])
 {
     WASMRuntimeFrame *prev_frame = wasm_exec_env_get_cur_frame(exec_env);
-    WASMInterpFrame *frame, *outs_area;
+    WASMInterpFrame *frame = NULL, *outs_area;
+    unsigned i;
 
-    /* Allocate sufficient cells for all kinds of return values.  */
-    unsigned all_cell_num =
-                 function->ret_cell_num > 2 ? function->ret_cell_num : 2,
-             i;
-    /* This frame won't be used by JITed code, so only allocate interp
-       frame here.  */
-    unsigned frame_size = wasm_interp_interp_frame_size(all_cell_num);
+#if WASM_PHANTOM_COMPAT != 0
+    bool phantom_restart = argc == -1;
+    if (!phantom_restart) {
+#endif
+        /* Allocate sufficient cells for all kinds of return values.  */
+        unsigned all_cell_num =
+                     function->ret_cell_num > 2 ? function->ret_cell_num : 2;
+        /* This frame won't be used by JITed code, so only allocate interp
+           frame here.  */
+        unsigned frame_size = wasm_interp_interp_frame_size(all_cell_num);
 
-    if (argc != function->param_cell_num) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "invalid argument count %d, expected %d",
-                 argc, function->param_cell_num);
-        wasm_set_exception(module_inst, buf);
-        return;
+        if (argc != function->param_cell_num) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "invalid argument count %d, expected %d",
+                     argc, function->param_cell_num);
+            wasm_set_exception(module_inst, buf);
+            return;
+        }
+
+        if ((uint8 *)&prev_frame < exec_env->native_stack_boundary) {
+            wasm_set_exception((WASMModuleInstance *)exec_env->module_inst,
+                               "native stack overflow");
+            return;
+        }
+
+        if (!(frame =
+                  ALLOC_FRAME(exec_env, frame_size, (WASMInterpFrame *)prev_frame)))
+            return;
+
+        outs_area = wasm_exec_env_wasm_stack_top(exec_env);
+        frame->function = NULL;
+        frame->ip = NULL;
+        /* There is no local variable. */
+        frame->sp = frame->lp + 0;
+
+        if (argc > 0)
+            word_copy(outs_area->lp, argv, argc);
+
+        wasm_exec_env_set_cur_frame(exec_env, frame);
+#if WASM_PHANTOM_COMPAT != 0
     }
+#endif
 
-    if ((uint8 *)&prev_frame < exec_env->native_stack_boundary) {
-        wasm_set_exception((WASMModuleInstance *)exec_env->module_inst,
-                           "native stack overflow");
-        return;
-    }
-
-    if (!(frame =
-              ALLOC_FRAME(exec_env, frame_size, (WASMInterpFrame *)prev_frame)))
-        return;
-
-    outs_area = wasm_exec_env_wasm_stack_top(exec_env);
-    frame->function = NULL;
-    frame->ip = NULL;
-    /* There is no local variable. */
-    frame->sp = frame->lp + 0;
-
-    if (argc > 0)
-        word_copy(outs_area->lp, argv, argc);
-
-    wasm_exec_env_set_cur_frame(exec_env, frame);
-
-    if (function->is_import_func) {
+    if (function->is_import_func) { // TODO: implement restart for imports ??
 #if WASM_ENABLE_MULTI_MODULE != 0
         if (function->import_module_inst) {
             wasm_interp_call_func_import(module_inst, exec_env, function,
@@ -3754,6 +3788,19 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
     else {
         wasm_interp_call_func_bytecode(module_inst, exec_env, function, frame);
     }
+
+#if WASM_PHANTOM_COMPAT != 0
+    if (phantom_restart) {
+        // XXX : basing this on supposition that when we call wasm from phantom
+        //       execution env.'s stack is empty (i.e. prev_frame == NULL)
+        while ((frame = wasm_exec_env_get_cur_frame(exec_env)->prev_frame)) {
+            wasm_exec_env_set_cur_frame(exec_env, frame);
+        }
+
+        frame = wasm_exec_env_get_cur_frame(exec_env);
+        prev_frame = frame->prev_frame;
+    }
+#endif
 
     /* Output the return value to the caller */
     if (!wasm_get_exception(module_inst)) {

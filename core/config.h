@@ -322,4 +322,8 @@
 #define WASM_ENABLE_REF_TYPES 0
 #endif
 
+#ifndef WASM_PHANTOM_COMPAT
+#define WASM_PHANTOM_COMPAT 0
+#endif
+
 #endif /* end of _CONFIG_H_ */
