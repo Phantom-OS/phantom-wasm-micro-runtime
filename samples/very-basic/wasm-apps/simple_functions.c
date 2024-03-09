@@ -46,3 +46,50 @@ int count_primes(int n) {
 }
 
 void void_return(int a, float b) { double c = a + b; }
+
+#include <stdio.h>
+
+void hello_world() { printf("Hello, world!\n"); }
+
+void print_prime_numbers(int limit, int interval, int offset) {
+    int counter = 0;
+    
+    for (int i = 0; i <= limit; i++) {
+        if (is_prime(i)) {
+            counter++;
+
+            if ((counter + offset) % interval == 0) {
+                printf("Prime number #%d: %d\n", counter, i);
+            }
+        }
+    }
+}
+
+int calculate_percentage(long long num, long long den) {
+    return (int)(100 * num / den);
+}
+
+long long long_sum_test(long long iter_count, int interval, long long start) {
+    long long sum = 0;
+    long long step = start;
+
+    printf("long_sum_test(): starting calculation...\n");
+
+    int last_perc = 0;
+
+    for (long long i = 0; i < iter_count; i++) {
+        sum += step;
+        step += interval;
+
+        int new_perc = calculate_percentage(i + 1, iter_count);
+        if (new_perc > last_perc) {
+            last_perc = new_perc;
+            printf("Calculating... %2d%%\n", new_perc);
+        }
+    }
+
+    printf("long_sum_test() complete: %lld\n", sum);
+
+    return sum;
+}
+
