@@ -756,8 +756,11 @@ static void
 wasm_interp_call_func_native(WASMModuleInstance *module_inst,
                              WASMExecEnv *exec_env,
                              WASMFunctionInstance *cur_func,
-                             WASMInterpFrame *prev_frame)
-{
+                             WASMInterpFrame *prev_frame
+#if WASM_PHANTOM_COMPAT != 0
+                             , uint32 *stack_pointer
+#endif
+) {
     WASMFunctionImport *func_import = cur_func->u.func_import;
     unsigned local_cell_num = 2;
     WASMInterpFrame *frame;
@@ -811,6 +814,9 @@ wasm_interp_call_func_native(WASMModuleInstance *module_inst,
     if (!ret)
         return;
 
+#if WASM_PHANTOM_COMPAT != 0
+    prev_frame->sp = stack_pointer;
+#endif
     if (cur_func->ret_cell_num == 1) {
         prev_frame->sp[0] = argv_ret[0];
         prev_frame->sp++;
@@ -1015,8 +1021,19 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #endif
 
 #if WASM_PHANTOM_COMPAT != 0
-    if (prev_frame == NULL) 
+    if (prev_frame == NULL) {
         RECOVER_CONTEXT(wasm_exec_env_get_cur_frame(exec_env));
+        
+        // if current frame is a native function, drop it
+        if (cur_func->is_import_func 
+#if WASM_ENABLE_MULTI_MODULE != 0
+            && !cur_func->import_func_inst
+#endif
+        ) { 
+            wasm_exec_env_free_wasm_frame(exec_env, frame);
+            RECOVER_CONTEXT(prev_frame);
+        }
+    }
 #endif
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
@@ -1226,6 +1243,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_CALL)
             {
+#if WASM_PHANTOM_COMPAT != 0 // sync to frame before potential native call
+                // SYNC_ALL_TO_FRAME();
+                frame->sp = frame_sp; 
+                frame->ip = frame_ip - 1; 
+                frame->csp = frame_csp;
+#endif
+
 #if WASM_ENABLE_THREAD_MGR != 0
                 CHECK_SUSPEND_FLAGS();
 #endif
@@ -1265,6 +1289,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_RETURN_CALL_INDIRECT)
 #endif
             {
+#if WASM_PHANTOM_COMPAT != 0 // sync to frame before potential native call
+                // SYNC_ALL_TO_FRAME();
+                frame->sp = frame_sp; 
+                frame->ip = frame_ip - 1; 
+                frame->csp = frame_csp;
+#endif
+
                 WASMType *cur_type, *cur_func_type;
                 WASMTableInstance *tbl_inst;
                 uint32 tbl_idx;
@@ -3601,7 +3632,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         /* Only do the copy when it's called from interpreter.  */
         WASMInterpFrame *outs_area = wasm_exec_env_wasm_stack_top(exec_env);
         POP(cur_func->param_cell_num);
+#if WASM_PHANTOM_COMPAT == 0
         SYNC_ALL_TO_FRAME();
+#endif // do not sync modified values before potential native call
         word_copy(outs_area->lp, frame_sp, cur_func->param_cell_num);
         prev_frame = frame;
     }
@@ -3611,6 +3644,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         if (cur_func->is_import_func) {
 #if WASM_ENABLE_MULTI_MODULE != 0
             if (cur_func->import_func_inst) {
+#if WASM_PHANTOM_COMPAT != 0 // not a native call, can sync
+                SYNC_ALL_TO_FRAME();
+#endif
                 wasm_interp_call_func_import(module, exec_env, cur_func,
                                              prev_frame);
             }
@@ -3618,7 +3654,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 #endif
             {
                 wasm_interp_call_func_native(module, exec_env, cur_func,
-                                             prev_frame);
+                                             prev_frame
+#if WASM_PHANTOM_COMPAT != 0
+                                             , frame_sp
+#endif
+                                             );
+#if WASM_PHANTOM_COMPAT != 0
+                frame->ip = frame_ip; // restore correct ip
+#endif
             }
 
             prev_frame = frame->prev_frame;
@@ -3633,6 +3676,10 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 goto got_exception;
         }
         else {
+#if WASM_PHANTOM_COMPAT != 0 // not a native call, can sync
+            SYNC_ALL_TO_FRAME();
+#endif
+
             WASMFunction *cur_wasm_func = cur_func->u.func;
             WASMType *func_type;
 
@@ -3782,7 +3829,11 @@ wasm_interp_call_wasm(WASMModuleInstance *module_inst, WASMExecEnv *exec_env,
         {
             /* it is a native function */
             wasm_interp_call_func_native(module_inst, exec_env, function,
-                                         frame);
+                                         frame
+#if WASM_PHANTOM_COMPAT != 0
+                                         , frame->sp
+#endif
+            );
         }
     }
     else {
