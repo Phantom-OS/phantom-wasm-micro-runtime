@@ -2,6 +2,8 @@
 //
 // 
 
+#include <stdint.h>
+
 double calculate_e(int N) {
     double fac = 1.0;
     double e = 1.0;
@@ -67,6 +69,56 @@ void print_prime_numbers(int limit, int interval, int offset) {
 
 int calculate_percentage(long long num, long long den) {
     return (int)(100 * num / den);
+}
+
+int64_t sum_perf_test(int64_t iter_count) {
+    int64_t sum = 0;
+
+    for (int64_t i = 1; i <= iter_count; i++) {
+        sum += i;
+    }
+
+    return sum;
+}
+
+#include <stdlib.h>
+
+int64_t memory_perf_test(int iter_count) {
+    int cell_count = 30000;
+    
+    int64_t *cells = calloc(sizeof(int64_t), cell_count);
+    if (cells == 0) {
+        printf("ERROR : MALLOC FAILURE\n");
+        return -1;
+    }
+
+    for (int i = 1; i <= iter_count; i++) {
+        for (int j = 0; j < cell_count; j++) {
+            cells[j]++;
+        }
+
+        for (int j = 0; j < cell_count; j++) {
+            if (cells[j] != i) {
+                printf("Error : cell value invalid!\n");
+                free(cells);
+                return -1;
+            }
+        }
+    }
+
+    int64_t result = 0;
+
+    for (int j = 0; j < cell_count; j++) {
+        result += cells[j];
+    }
+
+    free(cells);
+
+    return result;
+}
+
+void perf_test() {
+    memory_perf_test(4000);
 }
 
 long long long_sum_test(long long iter_count, int interval, long long start) {
