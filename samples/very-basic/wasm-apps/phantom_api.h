@@ -26,6 +26,8 @@ void phantom_release_object(phantom_object_t object_id);
 
 int phantom_throw(phantom_object_t object);
 
+unsigned char *phantom_get_string_contents(phantom_object_t object_id);
+
 /* Additional wrappers */
 
 #include <string.h>
@@ -77,10 +79,17 @@ int phantom_throw(phantom_object_t object);
 #define CT                          PHANTOM_CURRENT_THREAD
 
 // method indices
+#define PHANTOM_STRING_LENGTH               (11)
+
+#define PHANTOM_DIRECTORY_PUT               (8)
+
 #define PHANTOM_CONNECTION_CONNECT          (8)
 #define PHANTOM_CONNECTION_BLOCK            (13)
+
 #define PHANTOM_IO_TTY_PUTWS                (17)
+
 #define PHANTOM_BITMAP_LOAD_FROM_STRING     (8)
+
 #define PHANTOM_WINDOW_CLEAR                (20)
 #define PHANTOM_WINDOW_SET_FOREGROUND       (22)
 #define PHANTOM_WINDOW_SET_BACKGROUND       (23)
@@ -181,6 +190,15 @@ static inline phantom_object_t ph_load_bitmap(const char* bitmap_data, unsigned 
 static inline void ph_print(phantom_object_t tty, phantom_object_t message, int release_message) {
     ph_syscall(tty, PHANTOM_IO_TTY_PUTWS, &message, 1);
     if (release_message) phantom_release_object(message);
+}
+
+static inline unsigned char *ph_unpack_string(phantom_object_t string, int *string_length) {
+    unsigned char *buffer = phantom_get_string_contents(string);
+    phantom_object_t ret;
+    int retval = phantom_syscall(string, &ret, CT, PHANTOM_STRING_LENGTH, NULL, 0);
+    phantom_get_int(ret, string_length);
+
+    return buffer;
 }
 
 #endif // PHANTOM_WASM_API_H

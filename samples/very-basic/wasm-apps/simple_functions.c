@@ -229,11 +229,11 @@ void weather_demo(int sleep_msec) {
     phantom_release_object(black_color);
 
     phantom_object_t temp_obj = phantom_int(0);
-    phantom_object_t id_obj = phantom_int(0);
+    // phantom_object_t id_obj = phantom_int(0);
 
-    phantom_object_t tty = phantom_create_object(PHANTOM_TTY_CLASS);
-    phantom_object_t message_string1 = phantom_new_string("TTY heartbeat: ");
-    phantom_object_t message_string2 = phantom_new_string("...\n");
+    // phantom_object_t tty = phantom_create_object(PHANTOM_TTY_CLASS);
+    // phantom_object_t message_string1 = phantom_new_string("TTY heartbeat: ");
+    // phantom_object_t message_string2 = phantom_new_string("...\n");
 
     // Plotting loop
     while (1) {
@@ -242,10 +242,10 @@ void weather_demo(int sleep_msec) {
         ph_syscall(win, PHANTOM_WINDOW_DRAW_IMAGE_PART, draw_params, 7);
 
         // heartbeat
-        phantom_set_int(id_obj, temp_data_index);
-        ph_print(tty, message_string1, /* release_message = */ 0);
-        ph_print(tty, phantom_to_string(id_obj, CT), /* release_message = */ 1);
-        ph_print(tty, message_string2, /* release_message = */ 0);
+        // phantom_set_int(id_obj, temp_data_index);
+        // ph_print(tty, message_string1, /* release_message = */ 0);
+        // ph_print(tty, phantom_to_string(id_obj, CT), /* release_message = */ 1);
+        // ph_print(tty, message_string2, /* release_message = */ 0);
 
         phantom_set_int(temp_obj, itemp);
         first_str_draw[2] = phantom_to_string(temp_obj, CT);
